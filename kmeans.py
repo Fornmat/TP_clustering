@@ -38,6 +38,71 @@ def plot_clusters(X, labels, centers=None, title="", save=None, show=True):
     if show: plt.show()
     else: plt.close()
 
+def kmeans_grid_search(
+    X,
+    ks=range(2, 11),
+    n_init=20,
+    random_state=42,
+    plot_prefix=None,   # si pasas prefijo, guarda curvas (elbow/silhouette)
+    show=True
+):
+    """
+    Barre k y devuelve:
+      - best_k según Silhouette (desempate: CH ↑, DB ↓, Inertia ↓)
+      - df_metrics con k, inertia, silhouette, calinski, davies
+    """
+    from sklearn.cluster import KMeans
+    metrics_rows = []
+    for k in ks:
+        km = KMeans(n_clusters=k, init="k-means++", n_init=n_init,
+                    random_state=random_state)
+        labels = km.fit_predict(X)
+        m = eval_labels(X, labels)
+        metrics_rows.append({
+            "k": k,
+            "inertia": km.inertia_,
+            "silhouette": m["silhouette"],
+            "calinski": m["calinski"],
+            "davies": m["davies"],
+        })
+
+    dfm = pd.DataFrame(metrics_rows)
+
+    # Selección del mejor k (criterio principal: Silhouette ↑)
+    # desempate: CH ↑, DB ↓, luego Inertia ↓
+    dfm_sorted = dfm.sort_values(
+        by=["silhouette", "calinski", "davies", "inertia"],
+        ascending=[False, True, False, True]  # ojo: davies más bajo es mejor
+    )
+    best_k = int(dfm_sorted.iloc[0]["k"])
+
+    # Guardar/mostrar curvas si se pide
+    if plot_prefix is not None:
+        import matplotlib.pyplot as plt
+
+        # Elbow (inertia vs k)
+        plt.figure()
+        plt.plot(dfm["k"], dfm["inertia"], marker="o")
+        plt.xlabel("k"); plt.ylabel("Inertia")
+        plt.title("K-Means – Elbow")
+        plt.tight_layout()
+        plt.savefig(f"{plot_prefix}_kmeans_elbow.png", dpi=160, bbox_inches="tight")
+        if show: plt.show()
+        else: plt.close()
+
+        # Silhouette vs k
+        plt.figure()
+        plt.plot(dfm["k"], dfm["silhouette"], marker="o")
+        plt.xlabel("k"); plt.ylabel("Silhouette")
+        plt.title("K-Means – Silhouette vs k")
+        plt.tight_layout()
+        plt.savefig(f"{plot_prefix}_kmeans_silhouette.png", dpi=160, bbox_inches="tight")
+        if show: plt.show()
+        else: plt.close()
+
+    return best_k, dfm
+
+
 def main():
     ap = argparse.ArgumentParser(description="K-Means plot")
     ap.add_argument("--arff", type=str, help="Ruta a .arff (x,y[,class])")
@@ -62,13 +127,48 @@ def main():
     if args.standardize:
         X = StandardScaler().fit_transform(X)
 
-    model = KMeans(n_clusters=args.k, init="k-means++", n_init=20, random_state=42)
+    # --- Objetif 2: automatizar búsqueda de una "buena" solución ---
+    # prefijo para guardar curvas si pasaste --save
+    plot_prefix = None
+    if args.save:
+        base, _ = os.path.splitext(args.save)
+        plot_prefix = base
+
+    best_k, dfm = kmeans_grid_search(
+        X,
+        ks=range(2, 11),
+        n_init=20,
+        random_state=42,
+        plot_prefix=plot_prefix,          # genera *_elbow.png y *_silhouette.png
+        show=not args.no_show
+    )
+
+    # Entrenamos K-Means definitivo con el mejor k
+    model = KMeans(n_clusters=best_k, init="k-means++", n_init=20, random_state=42)
     labels = model.fit_predict(X)
     metrics = eval_labels(X, labels)
-    title = f"K-Means (k={args.k}) – Sil={metrics['silhouette']:.3f}  CH={metrics['calinski']:.1f}  DB={metrics['davies']:.3f}"
-    print(title)
 
-    plot_clusters(X, labels, centers=model.cluster_centers_, title=title, save=args.save)
+    # Reporte claro para el TP
+    print("\n=== K-MEANS – SELECCIÓN AUTOMÁTICA DE HIPERPARÁMETROS ===")
+    print(f"Mejor k (por Silhouette): {best_k}")
+    print("Resumen métricas por k:")
+    print(dfm.to_string(index=False, formatters={
+        "inertia": lambda v: f"{v:.1f}",
+        "silhouette": lambda v: f"{v:.3f}",
+        "calinski": lambda v: f"{v:.1f}",
+        "davies": lambda v: f"{v:.3f}",
+    }))
+
+    title = (f"K-Means (k={best_k}) – "
+            f"Sil={metrics['silhouette']:.3f}  CH={metrics['calinski']:.1f}  DB={metrics['davies']:.3f}")
+    print("\nMejor solución:", title)
+
+    # Guardar/mostrar scatter final
+    # si pasaste --save, guardaremos *_best.png
+    best_png = f"{plot_prefix}_kmeans_best.png" if plot_prefix else None
+    plot_clusters(X, labels, centers=model.cluster_centers_, title=title,
+                save=best_png, show=not args.no_show)
+
 
 if __name__ == "__main__":
     main()
