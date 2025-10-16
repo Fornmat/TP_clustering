@@ -1,17 +1,25 @@
+#!/usr/bin/env python3
 import argparse, os, numpy as np, matplotlib.pyplot as plt, pandas as pd
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
 
+
+# ------------------------------------------------------
+# FUNCIONES AUXILIARES
+# ------------------------------------------------------
 def load_arff(path):
     from scipy.io import arff
     data, _ = arff.loadarff(path)
     df = pd.DataFrame(data)
     for c in df.columns:
         if df[c].dtype == object:
-            try: df[c] = df[c].str.decode("utf-8")
-            except: pass
+            try:
+                df[c] = df[c].str.decode("utf-8")
+            except:
+                pass
     return df
+
 
 def eval_labels(X, labels):
     u = np.unique(labels)
@@ -23,35 +31,33 @@ def eval_labels(X, labels):
         davies=davies_bouldin_score(X, labels),
     )
 
+
 def plot_clusters(X, labels, centers=None, title="", save=None, show=True):
-    plt.figure(figsize=(6,6))
+    plt.figure(figsize=(6, 6))
     for lab in np.unique(labels):
-        mask = labels==lab
-        plt.scatter(X[mask,0], X[mask,1], s=20, label=f"c{lab}")
+        mask = labels == lab
+        plt.scatter(X[mask, 0], X[mask, 1], s=20, label=f"c{lab}")
     if centers is not None:
-        plt.scatter(centers[:,0], centers[:,1], c="black", marker="x", s=120, label="centers")
+        plt.scatter(
+            centers[:, 0], centers[:, 1],
+            c="black", marker="x", s=120, label="centers"
+        )
     plt.legend(fontsize=8)
-    plt.title(title); plt.tight_layout()
+    plt.title(title)
+    plt.tight_layout()
     if save:
         os.makedirs(os.path.dirname(save), exist_ok=True)
         plt.savefig(save, dpi=160, bbox_inches="tight")
-    if show: plt.show()
-    else: plt.close()
+    if show:
+        plt.show()
+    else:
+        plt.close()
 
-def kmeans_grid_search(
-    X,
-    ks=range(2, 11),
-    n_init=20,
-    random_state=42,
-    plot_prefix=None,   # si pasas prefijo, guarda curvas (elbow/silhouette)
-    show=True
-):
-    """
-    Barre k y devuelve:
-      - best_k según Silhouette (desempate: CH ↑, DB ↓, Inertia ↓)
-      - df_metrics con k, inertia, silhouette, calinski, davies
-    """
-    from sklearn.cluster import KMeans
+
+# ------------------------------------------------------
+# BÚSQUEDA AUTOMÁTICA DE k Y MÉTRICAS
+# ------------------------------------------------------
+def kmeans_grid_search(X, ks=range(2, 11), n_init=20, random_state=42):
     metrics_rows = []
     for k in ks:
         km = KMeans(n_clusters=k, init="k-means++", n_init=n_init,
@@ -65,93 +71,42 @@ def kmeans_grid_search(
             "calinski": m["calinski"],
             "davies": m["davies"],
         })
-
     dfm = pd.DataFrame(metrics_rows)
-
-    # Selección del mejor k (criterio principal: Silhouette ↑)
-    # desempate: CH ↑, DB ↓, luego Inertia ↓
+    # Seleccionar mejor k
     dfm_sorted = dfm.sort_values(
         by=["silhouette", "calinski", "davies", "inertia"],
-        ascending=[False, True, False, True]  # ojo: davies más bajo es mejor
+        ascending=[False, True, False, True]
     )
     best_k = int(dfm_sorted.iloc[0]["k"])
-
-    # Guardar/mostrar curvas si se pide
-    if plot_prefix is not None:
-        import matplotlib.pyplot as plt
-
-        # Elbow (inertia vs k)
-        plt.figure()
-        plt.plot(dfm["k"], dfm["inertia"], marker="o")
-        plt.xlabel("k"); plt.ylabel("Inertia")
-        plt.title("K-Means – Elbow")
-        plt.tight_layout()
-        plt.savefig(f"{plot_prefix}_kmeans_elbow.png", dpi=160, bbox_inches="tight")
-        if show: plt.show()
-        else: plt.close()
-
-        # Silhouette vs k
-        plt.figure()
-        plt.plot(dfm["k"], dfm["silhouette"], marker="o")
-        plt.xlabel("k"); plt.ylabel("Silhouette")
-        plt.title("K-Means – Silhouette vs k")
-        plt.tight_layout()
-        plt.savefig(f"{plot_prefix}_kmeans_silhouette.png", dpi=160, bbox_inches="tight")
-        if show: plt.show()
-        else: plt.close()
-
     return best_k, dfm
 
 
+# ------------------------------------------------------
+# MAIN
+# ------------------------------------------------------
 def main():
-    ap = argparse.ArgumentParser(description="K-Means plot")
+    ap = argparse.ArgumentParser(description="K-Means con análisis comparativo")
     ap.add_argument("--arff", type=str, help="Ruta a .arff (x,y[,class])")
-    ap.add_argument("--csv", type=str, help="Ruta a .csv (alternativa a --arff)")
-    ap.add_argument("--xcol", type=str, default="x")
-    ap.add_argument("--ycol", type=str, default="y")
-    ap.add_argument("--k", type=int, default=3)
+    ap.add_argument("--csv", type=str, help="Ruta a .csv")
     ap.add_argument("--standardize", action="store_true")
-    ap.add_argument("--save", type=str, help="PNG de salida")
+    ap.add_argument("--save", type=str, help="PNG base de salida")
     ap.add_argument("--no-show", action="store_true")
+    ap.add_argument("--k", type=int, help="Número fijo de clusters (opcional)")
     args = ap.parse_args()
 
     if not args.arff and not args.csv:
         ap.error("Proporciona --arff o --csv")
 
-    if args.arff:
-        df = load_arff(args.arff)
-    else:
-        df = pd.read_csv(args.csv)
-
+    # Cargar dataset
+    df = load_arff(args.arff) if args.arff else pd.read_csv(args.csv)
     X = df.iloc[:, :2].values
     if args.standardize:
         X = StandardScaler().fit_transform(X)
 
-    # --- Objetif 2: automatizar búsqueda de una "buena" solución ---
-    # prefijo para guardar curvas si pasaste --save
-    plot_prefix = None
-    if args.save:
-        base, _ = os.path.splitext(args.save)
-        plot_prefix = base
+    # Buscar mejor k (si no se especifica)
+    best_k, dfm = kmeans_grid_search(X, ks=range(2, 11))
 
-    best_k, dfm = kmeans_grid_search(
-        X,
-        ks=range(2, 11),
-        n_init=20,
-        random_state=42,
-        plot_prefix=plot_prefix,          # genera *_elbow.png y *_silhouette.png
-        show=not args.no_show
-    )
-
-    # Entrenamos K-Means definitivo con el mejor k
-    model = KMeans(n_clusters=best_k, init="k-means++", n_init=20, random_state=42)
-    labels = model.fit_predict(X)
-    metrics = eval_labels(X, labels)
-
-    # Reporte claro para el TP
     print("\n=== K-MEANS – SELECCIÓN AUTOMÁTICA DE HIPERPARÁMETROS ===")
-    print(f"Mejor k (por Silhouette): {best_k}")
-    print("Resumen métricas por k:")
     print(dfm.to_string(index=False, formatters={
         "inertia": lambda v: f"{v:.1f}",
         "silhouette": lambda v: f"{v:.3f}",
@@ -159,16 +114,58 @@ def main():
         "davies": lambda v: f"{v:.3f}",
     }))
 
-    title = (f"K-Means (k={best_k}) – "
-            f"Sil={metrics['silhouette']:.3f}  CH={metrics['calinski']:.1f}  DB={metrics['davies']:.3f}")
-    print("\nMejor solución:", title)
+    # ------------------------------------------------------------
+    # Si el usuario pasa --k, se usa ese valor, si no, se usa el óptimo
+    # ------------------------------------------------------------
+    k_to_use = args.k if args.k else best_k
+    print(f"\nSe utilizará k = {k_to_use} "
+          f"({'fijado por el usuario' if args.k else 'óptimo por Silhouette'})")
 
-    # Guardar/mostrar scatter final
-    # si pasaste --save, guardaremos *_best.png
-    best_png = f"{plot_prefix}_kmeans_best.png" if plot_prefix else None
+    # Entrenar modelo final con ese k
+    model = KMeans(n_clusters=k_to_use, init="k-means++", n_init=20, random_state=42)
+    labels = model.fit_predict(X)
+    metrics = eval_labels(X, labels)
+
+    title = (f"K-Means (k={k_to_use}) – "
+             f"Sil={metrics['silhouette']:.3f}  "
+             f"CH={metrics['calinski']:.1f}  DB={metrics['davies']:.3f}")
+    print("\nMétricas del modelo final:", title)
+
+    # Mostrar clustering final
+    best_png = None
+    if args.save:
+        base, _ = os.path.splitext(args.save)
+        best_png = f"{base}_k{k_to_use}_clusters.png"
     plot_clusters(X, labels, centers=model.cluster_centers_, title=title,
-                save=best_png, show=not args.no_show)
+                  save=best_png, show=not args.no_show)
+
+    # ------------------------------------------------------------
+    # Gráfica comparativa de calidad vs k
+    # ------------------------------------------------------------
+    plt.figure(figsize=(7,5))
+    plt.plot(dfm["k"], dfm["silhouette"], marker="o", label="Silhouette (↑ mejor)")
+    plt.plot(dfm["k"], dfm["calinski"]/dfm["calinski"].max(), marker="s",
+             label="Calinski (normalizado ↑ mejor)")
+    plt.plot(dfm["k"], dfm["davies"]/dfm["davies"].max(), marker="^",
+             label="Davies (normalizado ↓ mejor)")
+    plt.axvline(best_k, color="red", linestyle="--", label=f"k óptimo = {best_k}")
+    if args.k:
+        plt.axvline(args.k, color="blue", linestyle=":", label=f"k usuario = {args.k}")
+    plt.xlabel("Número de clusters (k)")
+    plt.ylabel("Índices normalizados de calidad")
+    plt.title("Comparativa de métricas de clustering vs k")
+    plt.legend()
+    plt.tight_layout()
+    if args.save:
+        base, _ = os.path.splitext(args.save)
+        plt.savefig(f"{base}_comparativa_metricas.png", dpi=160, bbox_inches="tight")
+    if not args.no_show:
+        plt.show()
+    else:
+        plt.close()
 
 
 if __name__ == "__main__":
     main()
+
+
