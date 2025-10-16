@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import argparse
 import os
 import numpy as np
@@ -11,7 +12,9 @@ from sklearn.metrics import (
     davies_bouldin_score,
 )
 
-# -------------------- IO / Utils --------------------
+# ------------------------------------------------------
+# FUNCIONES AUXILIARES
+# ------------------------------------------------------
 def load_arff(path):
     from scipy.io import arff
     data, _ = arff.loadarff(path)
@@ -25,6 +28,7 @@ def load_arff(path):
                 pass
     return df
 
+
 def eval_labels(X, labels):
     u = np.unique(labels)
     if len(u) < 2:
@@ -34,6 +38,7 @@ def eval_labels(X, labels):
         calinski=calinski_harabasz_score(X, labels),
         davies=davies_bouldin_score(X, labels),
     )
+
 
 def plot_clusters(X, labels, title="", save=None, show=True):
     plt.figure(figsize=(6, 6))
@@ -52,16 +57,43 @@ def plot_clusters(X, labels, title="", save=None, show=True):
     else:
         plt.close()
 
-# -------------------- Main --------------------
+
+# ------------------------------------------------------
+# GRID SEARCH PARA K
+# ------------------------------------------------------
+def agglomerative_grid_search(X, linkage="ward", ks=range(2, 11)):
+    metrics_rows = []
+    for k in ks:
+        model = AgglomerativeClustering(n_clusters=k, linkage=linkage)
+        labels = model.fit_predict(X)
+        m = eval_labels(X, labels)
+        metrics_rows.append({
+            "k": k,
+            "silhouette": m["silhouette"],
+            "calinski": m["calinski"],
+            "davies": m["davies"],
+        })
+    dfm = pd.DataFrame(metrics_rows)
+    # mejor k = máximo silhouette
+    dfm_sorted = dfm.sort_values(
+        by=["silhouette", "calinski", "davies"],
+        ascending=[False, True, False]
+    )
+    best_k = int(dfm_sorted.iloc[0]["k"])
+    return best_k, dfm
+
+
+# ------------------------------------------------------
+# MAIN
+# ------------------------------------------------------
 def main():
-    ap = argparse.ArgumentParser(description="Agglomerative clustering plot")
+    ap = argparse.ArgumentParser(description="Agglomerative clustering con análisis comparativo")
     ap.add_argument("--arff", type=str, help="Ruta a .arff (x,y[,class])")
-    ap.add_argument("--csv", type=str, help="Ruta a .csv (alternativa a --arff)")
-    # Para compatibilidad con tu script anterior, mantenemos xcol/ycol,
-    # pero por defecto tomaremos las 2 primeras columnas si no existen:
-    ap.add_argument("--xcol", type=str, default=None)
-    ap.add_argument("--ycol", type=str, default=None)
-    ap.add_argument("--k", type=int, default=3, help="Número de clusters")
+    ap.add_argument("--csv", type=str, help="Ruta a .csv")
+    ap.add_argument("--standardize", action="store_true")
+    ap.add_argument("--save", type=str, help="PNG base de salida")
+    ap.add_argument("--no-show", action="store_true")
+    ap.add_argument("--k", type=int, help="Número fijo de clusters (opcional)")
     ap.add_argument(
         "--linkage",
         type=str,
@@ -69,50 +101,81 @@ def main():
         choices=["ward", "complete", "average", "single"],
         help="Criterio de enlace (ward requiere distancia euclídea)",
     )
-    ap.add_argument("--standardize", action="store_true")
-    ap.add_argument("--save", type=str, help="PNG de salida")
-    ap.add_argument("--no-show", action="store_true")
     args = ap.parse_args()
 
     if not args.arff and not args.csv:
         ap.error("Proporciona --arff o --csv")
 
-    # Cargar datos
+    # -----------------------------
+    # Cargar dataset
+    # -----------------------------
     df = load_arff(args.arff) if args.arff else pd.read_csv(args.csv)
-
-    # Selección de columnas: prioriza xcol/ycol si existen; si no, 2 primeras
-    if args.xcol and args.ycol and args.xcol in df.columns and args.ycol in df.columns:
-        X = df[[args.xcol, args.ycol]].values
-    else:
-        X = df.iloc[:, :2].values  # dos primeras columnas
-
-    # Estandarizar si procede
+    X = df.iloc[:, :2].values
     if args.standardize:
         X = StandardScaler().fit_transform(X)
 
-    # Ajuste del modelo aglomerativo
-    model = AgglomerativeClustering(n_clusters=args.k, linkage=args.linkage)
-    labels = model.fit_predict(X)
+    # -----------------------------
+    # Búsqueda automática o k fijo
+    # -----------------------------
+    best_k, dfm = agglomerative_grid_search(X, linkage=args.linkage, ks=range(2, 11))
+    print("\n=== AGGLOMERATIVE – SELECCIÓN AUTOMÁTICA DE HIPERPARÁMETROS ===")
+    print(dfm.to_string(index=False, formatters={
+        "silhouette": lambda v: f"{v:.3f}",
+        "calinski": lambda v: f"{v:.1f}",
+        "davies": lambda v: f"{v:.3f}",
+    }))
 
-    # Métricas y título
+    # Determinar k a usar
+    k_to_use = args.k if args.k else best_k
+    print(f"\nSe utilizará k = {k_to_use} "
+          f"({'fijado por el usuario' if args.k else 'óptimo por Silhouette'})")
+
+    # -----------------------------
+    # Entrenar modelo final
+    # -----------------------------
+    model = AgglomerativeClustering(n_clusters=k_to_use, linkage=args.linkage)
+    labels = model.fit_predict(X)
     metrics = eval_labels(X, labels)
-    n_clusters = len(np.unique(labels))
     title = (
-        f"Agglomerative (linkage={args.linkage}, k={args.k}) – "
-        f"clusters={n_clusters} – "
+        f"Agglomerative (linkage={args.linkage}, k={k_to_use}) – "
         f"Sil={metrics['silhouette']:.3f}  CH={metrics['calinski']:.1f}  DB={metrics['davies']:.3f}"
     )
-    print(title)
+    print("\nMétricas del modelo final:", title)
 
-    # Plot
-    plot_clusters(
-        X,
-        labels,
-        title=title,
-        save=args.save,
-        show=not args.no_show,
-    )
+    # -----------------------------
+    # Mostrar cluster final
+    # -----------------------------
+    best_png = None
+    if args.save:
+        base, _ = os.path.splitext(args.save)
+        best_png = f"{base}_agglo_k{k_to_use}_clusters.png"
+    plot_clusters(X, labels, title=title, save=best_png, show=not args.no_show)
+
+    # -----------------------------
+    # Gráfica comparativa de calidad vs k
+    # -----------------------------
+    plt.figure(figsize=(7,5))
+    plt.plot(dfm["k"], dfm["silhouette"], marker="o", label="Silhouette (↑ mejor)")
+    plt.plot(dfm["k"], dfm["calinski"]/dfm["calinski"].max(), marker="s",
+             label="Calinski (normalizado ↑ mejor)")
+    plt.plot(dfm["k"], dfm["davies"]/dfm["davies"].max(), marker="^",
+             label="Davies (normalizado ↓ mejor)")
+    plt.axvline(best_k, color="red", linestyle="--", label=f"k óptimo = {best_k}")
+    if args.k:
+        plt.axvline(args.k, color="blue", linestyle=":", label=f"k usuario = {args.k}")
+    plt.xlabel("Número de clusters (k)")
+    plt.ylabel("Índices normalizados de calidad")
+    plt.title(f"Comparativa de métricas de Agglomerative ({args.linkage}) vs k")
+    plt.legend()
+    plt.tight_layout()
+    if args.save:
+        base, _ = os.path.splitext(args.save)
+        plt.savefig(f"{base}_agglo_comparativa_metricas.png", dpi=160, bbox_inches="tight")
+    if not args.no_show:
+        plt.show()
+    else:
+        plt.close()
+
 
 if __name__ == "__main__":
     main()
-
